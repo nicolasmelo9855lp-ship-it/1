@@ -1,75 +1,39 @@
-name: macOS VNC via ZeroTier (Apple Screen Sharing)
+name: macOS VNC via ZeroTier (fixed password)
 
 on:
   workflow_dispatch:
-    inputs:
-      zerotier_network:
-        description: "ZeroTier Network ID (from https://my.zerotier.com)"
-        required: true
-      vnc_password:
-        description: "VNC password (max 8 chars)"
-        required: false
-        default: "12345678"
-      runtime_minutes:
-        description: "Keep-alive minutes (max 360)"
-        required: false
-        default: "120"
 
 jobs:
   vnc:
-    runs-on: macos-13
-    timeout-minutes: 370
+    runs-on: macos-latest
     steps:
-      - name: Enable Apple Screen Sharing and set password
-        shell: bash
+      - name: Download and extract TigerVNC
         run: |
           set -euo pipefail
-          PW="${{ inputs.vnc_password }}"
-          PW="${PW:0:8}"
-          KS="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-          sudo "$KS" -activate -configure -access -on -allowAccessFor -allUsers -restart -agent -menu
-          sudo "$KS" -configure -clientopts -setvnclegacy -vnclegacy yes
-          sudo "$KS" -configure -setvncpw -vncpw "$PW"
-          nohup caffeinate -dimsu >/tmp/caffeinate.log 2>&1 &
-          echo "Apple Screen Sharing listening on TCP 5900"
+          curl -L -o /tmp/tigervnc.tar.gz https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.x86_64-Darwin.tar.gz/download
+          tar -xzf /tmp/tigervnc.tar.gz -C /tmp || true
+
+      - name: Set VNC password and start server (port 5900)
+        run: |
+          set -euo pipefail
+          brew install tigervnc || true
+          mkdir -p ~/.vnc
+          echo "Bullet@12345" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          nohup vncserver :0 -rfbport 5900 -SecurityTypes VncAuth &
 
       - name: Install and join ZeroTier
-        shell: bash
         run: |
           set -euo pipefail
-          curl -fL https://install.zerotier.com/ -o /tmp/zt.sh
-          sudo bash /tmp/zt.sh
-          sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "Authorize this member in your ZeroTier dashboard."
+          curl -s https://install.zerotier.com | bash
+          sudo zerotier-cli join <YOUR_NETWORK_ID>
 
       - name: Wait for ZeroTier IP and show connect info
-        shell: bash
         run: |
           set -euo pipefail
-          ZT_IP=""
-          for i in {1..24}; do
-            ZT_IP="$(sudo zerotier-cli listnetworks 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
-            [ -n "$ZT_IP" ] && break
-            sleep 5
-          done
-          if [ -n "$ZT_IP" ]; then
-            echo "ZT_IP=$ZT_IP" >> "$GITHUB_ENV"
-            echo "Connect with an ARD-compatible VNC client:"
-            echo " Address : $ZT_IP:5900"
-            echo " Password: first 8 chars you entered"
-            echo "Recommended clients: Mocha VNC Lite (Android), Screens."
-          else
-            echo "No ZeroTier IP yet. Authorize the node in the dashboard."
-          fi
-
-      - name: Keep alive
-        shell: bash
-        run: |
-          rt="${{ inputs.runtime_minutes }}"
-          case "$rt" in (''|*[!0-9]*) rt=120;; esac
-          [ "$rt" -gt 360 ] && rt=360
-          end=$(( $(date +%s) + 60*rt ))
-          while [ "$(date +%s)" -lt "$end" ]; do
-            echo "[ZT+AppleVNC] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP:-authorize}:5900"
-            sleep 60
-          done
+          sleep 25
+          ip=$(zerotier-cli listpeers; ifconfig | grep -Eo "172\.[0-9]+\.[0-9]+\.[0-9]+")
+          echo "✅ Connect using a VNC client:"
+          echo "Address: $ip:5900"
+          echo "Password: Bullet@12345"
+          echo "Recommended client: Mocha VNC Lite (Android)"

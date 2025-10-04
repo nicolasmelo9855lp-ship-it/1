@@ -1,17 +1,17 @@
-name: macOS VNC via ZeroTier (Python download, standard VNC 5901)
+name: macOS VNC via ZeroTier (stable)
 
 on:
   workflow_dispatch:
     inputs:
       zerotier_network:
-        description: "ZeroTier Network ID from https://my.zerotier.com"
+        description: "ZeroTier Network ID (from https://my.zerotier.com)"
         required: true
       vnc_password:
-        description: "VNC password (max 8 chars; extras ignored)"
+        description: "VNC password (max 8 chars)"
         required: false
         default: "12345678"
       runtime_minutes:
-        description: "Keep-alive runtime (max 360)"
+        description: "Keep-alive minutes (max 360)"
         required: false
         default: "120"
 
@@ -20,81 +20,61 @@ jobs:
     runs-on: macos-13
     timeout-minutes: 370
     steps:
-      - name: Download and extract TigerVNC using Python (no heredoc)
+      - name: Download and extract TigerVNC
         shell: bash
         run: |
           set -euo pipefail
-          PYCODE="import os,sys,tarfile,urllib.request,ssl,platform; \
-arch=platform.machine().lower(); \
-fname='TigerVNC-1.13.1-x86_64-Darwin.tar.gz' if arch in ('x86_64','amd64') else ('TigerVNC-1.13.1-arm64-Darwin.tar.gz' if arch in ('arm64','aarch64') else None); \
-assert fname, f'unsupported arch: {arch}'; \
-urls=[f'https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/{fname}', f'https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/{fname}/download']; \
-ua=('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15'); \
-ctx=ssl.create_default_context(); \
-dst='/tmp/tigervnc.tar.gz'; ok=False; \
-for u in urls: \
-  try: \
-    req=urllib.request.Request(u, headers={'User-Agent':ua}); \
-    with urllib.request.urlopen(req, context=ctx, timeout=120) as r, open(dst,'wb') as f: f.write(r.read()); \
-    with open(dst,'rb') as f: magic=f.read(2); \
-    if magic!=b'\\x1f\\x8b': raise RuntimeError('not gzip from '+u); \
-    ok=True; break; \
-  except Exception as e: print('download failed', u, e, file=sys.stderr); \
-assert ok, 'all downloads failed'; \
-outdir='/tmp/vncbin'; os.makedirs(outdir, exist_ok=True); \
-tarfile.open(dst,'r:gz').extractall(outdir); \
-found=None; \
-import os as _os; \
-for root,dirs,files in _os.walk(outdir): \
-  if 'vncserver' in files and 'vncpasswd' in files: found=root; break; \
-assert found, 'vncserver/vncpasswd not found'; \
-open('/tmp/vnc_path.txt','w').write(found)"
-          python3 -c "$PYCODE"
-          echo "TigerVNC path:"
-          cat /tmp/vnc_path.txt
+          arch="$(uname -m)"
+          if [ "$arch" = "x86_64" ]; then
+            url="https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/TigerVNC-1.13.1-x86_64-Darwin.tar.gz"
+          else
+            url="https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/TigerVNC-1.13.1-arm64-Darwin.tar.gz"
+          fi
+          curl -fL -A "Mozilla/5.0" "$url" -o /tmp/tigervnc.tar.gz
+          mkdir -p /tmp/vncbin
+          tar -xzf /tmp/tigervnc.tar.gz -C /tmp/vncbin
+          VNC_DIR="$(find /tmp/vncbin -type f -name vncserver -maxdepth 3 -print -quit | xargs dirname)"
+          echo "$VNC_DIR" > /tmp/vnc_path.txt
+          test -x "$VNC_DIR/vncserver"
 
       - name: Set VNC password and start server (port 5901)
         shell: bash
         run: |
           set -euo pipefail
-          VNCDIR="$(cat /tmp/vnc_path.txt)"
+          VNC_DIR="$(cat /tmp/vnc_path.txt)"
           mkdir -p "$HOME/.vnc"
-          VNC_PW="${{ inputs.vnc_password }}"
-          VNC_PW="${VNC_PW:0:8}"
-          # Use TigerVNC's own vncpasswd to create a proper password file
-          printf '%s\n' "$VNC_PW" | "$VNCDIR/vncpasswd" -f > "$HOME/.vnc/passwd"
+          PW="${{ inputs.vnc_password }}"
+          PW="${PW:0:8}"
+          printf '%s\n' "$PW" | "$VNC_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
-          nohup "$VNCDIR/vncserver" :1 -geometry 1280x720 -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
+          nohup "$VNC_DIR/vncserver" :1 -geometry 1280x720 -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
           sleep 5
-          echo "TigerVNC running on port 5901 (display :1)."
+          echo "TigerVNC started on :1 (TCP 5901)."
 
       - name: Install and join ZeroTier
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL https://install.zerotier.com/ -o zt.sh
-          sudo bash zt.sh
-          sudo zerotier-cli status || true
+          curl -fL https://install.zerotier.com/ -o /tmp/zt.sh
+          sudo bash /tmp/zt.sh
           sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "Joined ZeroTier network: ${{ inputs.zerotier_network }}"
-          echo "Authorize this member in the ZeroTier web dashboard."
+          echo "Authorize this member in the ZeroTier dashboard."
 
       - name: Wait for ZeroTier IP
         shell: bash
         run: |
           set -euo pipefail
-          ZT_IP=""
           for i in {1..24}; do
-            ZT_IP="$(sudo zerotier-cli listnetworks 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
-            [ -n "$ZT_IP" ] && break
+            IP="$(sudo zerotier-cli listnetworks 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
+            [ -n "$IP" ] && break
             sleep 5
           done
-          if [ -n "$ZT_IP" ]; then
-            echo "ZT_IP=$ZT_IP" >> "$GITHUB_ENV"
-            echo "Connect with any VNC client to: $ZT_IP:5901"
+          if [ -n "$IP" ]; then
+            echo "ZT_IP=$IP" >> "$GITHUB_ENV"
+            echo "Connect VNC client to: $IP:5901"
             echo "Password: first 8 chars you entered"
           else
-            echo "No ZeroTier IP yet. Authorize the node in the dashboard, then connect to <ZT IP>:5901."
+            echo "No ZeroTier IP yet. Authorize the node in dashboard."
           fi
 
       - name: Keep alive

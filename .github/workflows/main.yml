@@ -1,4 +1,4 @@
-name: macOS VNC via ZeroTier (stable, with VNC self-test)
+name: macOS VNC via ZeroTier (brew TigerVNC, robust paths)
 
 on:
   workflow_dispatch:
@@ -20,66 +20,46 @@ jobs:
     runs-on: macos-13
     timeout-minutes: 370
     steps:
-      - name: Download and extract TigerVNC
+      - name: Install TigerVNC via Homebrew and locate binaries
         shell: bash
         run: |
           set -euo pipefail
-          arch="$(uname -m)"
-          if [ "$arch" = "x86_64" ]; then
-            url="https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.x86_64-Darwin.tar.gz/download"
-          else
-            url="https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.aarch64-Darwin.tar.gz/download"
-          fi
-          echo "Downloading TigerVNC from: $url"
-          curl -fL -A "Mozilla/5.0" "$url" -o /tmp/tigervnc.tar.gz
-          echo "Downloaded file type:"
-          file /tmp/tigervnc.tar.gz || true
-          mkdir -p /tmp/vncbin
-          # Try standard extract, then a gzip fallback if SF serves odd headers
-          tar -xzf /tmp/tigervnc.tar.gz -C /tmp/vncbin \
-          || gzip -dc /tmp/tigervnc.tar.gz | tar -xf - -C /tmp/vncbin
-          # Locate the directory that contains vncserver (and vncpasswd)
-          VNC_DIR="$(find /tmp/vncbin -type f -name vncserver -maxdepth 3 -print -quit | xargs dirname)"
-          if [ -z "$VNC_DIR" ] || [ ! -x "$VNC_DIR/vncserver" ]; then
-            echo "Could not find vncserver after extract."
+          brew update >/dev/null
+          brew install tiger-vnc
+          BIN_DIR="$(brew --prefix tiger-vnc)/bin"
+          if [ ! -x "$BIN_DIR/vncserver" ] || [ ! -x "$BIN_DIR/vncpasswd" ]; then
+            echo "TigerVNC binaries not found in $BIN_DIR"
+            echo "Installed files:"
+            brew list tiger-vnc
             exit 1
           fi
-          echo "$VNC_DIR" > /tmp/vnc_path.txt
-          echo "TigerVNC extracted; bin dir: $VNC_DIR"
+          echo "$BIN_DIR" > /tmp/vnc_bin_dir
+          echo "TigerVNC bin dir: $BIN_DIR"
 
-      - name: Set VNC password and start server (port 5901)
+      - name: Set VNC password and start server (port 5901) + self-test
         shell: bash
         run: |
           set -euo pipefail
-          VNC_DIR="$(cat /tmp/vnc_path.txt)"
+          BIN_DIR="$(cat /tmp/vnc_bin_dir)"
           mkdir -p "$HOME/.vnc"
           PW="${{ inputs.vnc_password }}"
           PW="${PW:0:8}"
-          if [ -x "$VNC_DIR/vncpasswd" ]; then
-            printf '%s\n' "$PW" | "$VNC_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
-          else
-            # Fallback: try the system vncpasswd if present
-            if command -v vncpasswd >/dev/null 2>&1; then
-              printf '%s\n' "$PW" | vncpasswd -f > "$HOME/.vnc/passwd"
-            else
-              echo "No vncpasswd found; cannot create password file."
-              exit 1
-            fi
-          fi
+          printf '%s\n' "$PW" | "$BIN_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
-          nohup "$VNC_DIR/vncserver" :1 -geometry 1280x720 -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
-          # Self-test: wait up to 30s for port 5901 to listen
-          ok=0
+          nohup "$BIN_DIR/vncserver" :1 -geometry 1280x720 -SecurityTypes VncAuth -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
+          # Wait for port 5901 to listen
           for i in {1..30}; do
-            if lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then ok=1; break; fi
+            if lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then
+              echo "TigerVNC is listening on TCP 5901."
+              break
+            fi
             sleep 1
           done
-          if [ "$ok" -ne 1 ]; then
-            echo "VNC did not start listening on 5901. Log tail:"
-            tail -n 80 "$HOME/vnc.log" || true
+          if ! lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "VNC did not start; log tail:"
+            tail -n 120 "$HOME/vnc.log" || true
             exit 1
           fi
-          echo "TigerVNC is listening on TCP 5901."
 
       - name: Install and join ZeroTier
         shell: bash
@@ -109,7 +89,7 @@ jobs:
             echo " Password: first 8 chars you provided"
             echo "===================================="
           else
-            echo "No ZeroTier IP yet. Authorize this node in dashboard, then connect to <ZT_IP>:5901"
+            echo "No ZeroTier IP yet. Authorize the node in dashboard, then connect to <ZT_IP>:5901"
           fi
 
       - name: Keep alive

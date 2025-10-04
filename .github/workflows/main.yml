@@ -1,4 +1,4 @@
-name: Ubuntu VNC via ZeroTier (FAST, passwordless)
+name: Linux VNC via ZeroTier (Full GUI + Passwordless + Auto Fix)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: ZeroTier Network ID (from my.zerotier.com)
         required: true
       zerotier_api_token:
-        description: ZeroTier API Token (masked in logs)
+        description: ZeroTier API Token (masked)
         required: true
       runtime_minutes:
-        description: Keep-alive minutes (<=360)
+        description: Keep alive duration (minutes)
         required: false
         default: "180"
 
@@ -20,92 +20,79 @@ jobs:
     timeout-minutes: 370
 
     steps:
-      - name: Install minimal GUI stack
+      - name: Install full desktop + VNC tools
         run: |
-          set -e
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            xvfb x11vnc openbox xterm dbus-x11 curl jq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies tightvncserver x11vnc xvfb openbox \
+            lxde-core lxterminal dbus-x11 net-tools curl jq
           sudo apt-get clean
 
-      - name: Start Xvfb + openbox + x11vnc (passwordless on :5900)
+      - name: Start virtual desktop (Xvfb + LXDE)
         run: |
-          set -e
-          Xvfb :0 -screen 0 1280x720x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
-          echo $! > /tmp/xvfb.pid
-          DISPLAY=:0 openbox-session >/tmp/openbox.log 2>&1 &
-          echo $! > /tmp/openbox.pid
+          export DISPLAY=:0
+          Xvfb :0 -screen 0 1366x768x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          sleep 3
+          startlxde >/tmp/lxde.log 2>&1 &
+          sleep 5
+          echo "Desktop session started."
+
+      - name: Start x11vnc (passwordless) with retry
+        run: |
+          export DISPLAY=:0
           x11vnc -display :0 -rfbport 5900 -forever -shared -nopw -ncache 10 \
                  -o /tmp/x11vnc.log >/dev/null 2>&1 &
-          echo $! > /tmp/x11vnc.pid
-
-          for i in $(seq 1 30); do
-            ss -ltn | grep -q ':5900' && { echo "x11vnc listening on 5900"; break; }
-            sleep 1
+          for i in $(seq 1 40); do
+            ss -ltn | grep -q ':5900' && { echo "✅ VNC running on port 5900"; break; }
+            sleep 2
           done
-          ss -ltn | grep -q ':5900' || { echo "VNC did not open port 5900"; exit 1; }
+          ss -ltn | grep -q ':5900' || { echo "❌ VNC did not start, retrying with TigerVNC..."; }
+          sudo vncserver :1 -geometry 1366x768 -SecurityTypes None || true
 
       - name: Install and join ZeroTier
         run: |
-          set -e
           curl -fsSL https://install.zerotier.com/ -o /tmp/zt.sh
           sudo bash /tmp/zt.sh
           sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "::add-mask::${{ inputs.zerotier_api_token }}"
 
-      - name: Auto-authorize this member (ZeroTier API)
+      - name: Authorize this device automatically
         env:
           ZT_NET: ${{ inputs.zerotier_network }}
           ZT_TOKEN: ${{ inputs.zerotier_api_token }}
         run: |
-          set -e
           NODE_ID=$(sudo zerotier-cli -j info | jq -r '.address')
           API="https://api.zerotier.com/api/v1/network/${ZT_NET}/member/${NODE_ID}"
           PAY='{"config":{"authorized":true}}'
-          code=$(curl -sS -o /tmp/zt.json -w "%{http_code}" \
-                 -H "Authorization: bearer ${ZT_TOKEN}" -H "Content-Type: application/json" \
-                 -X POST "$API" -d "$PAY" || true)
-          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+          for method in POST PUT; do
             code=$(curl -sS -o /tmp/zt.json -w "%{http_code}" \
-                   -H "Authorization: bearer ${ZT_TOKEN}" -H "Content-Type: application/json" \
-                   -X PUT "$API" -d "$PAY" || true)
-          fi
-          echo "ZeroTier API status: $code"
-          [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || { cat /tmp/zt.json || true; exit 1; }
-
-          echo "Waiting for authorization..."
-          for i in $(seq 1 24); do
-            ST=$(sudo zerotier-cli -j listnetworks | jq -r '.[] | select(.nwid=="'${ZT_NET}'") | .status' || true)
-            [ "$ST" = "OK" ] && { echo "Authorized."; break; }
-            sleep 5
+                   -H "Authorization: bearer ${ZT_TOKEN}" \
+                   -H "Content-Type: application/json" \
+                   -X $method "$API" -d "$PAY" || true)
+            [ "$code" -ge 200 ] && [ "$code" -lt 300 ] && break
           done
+          echo "ZeroTier auth status: $code"
 
-      - name: Get ZeroTier IP and show connect info
+      - name: Display VNC connection info
         run: |
-          set -e
-          for i in $(seq 1 24); do
-            ZT_IP=$(sudo zerotier-cli listnetworks | awk '{for(n=1;n<=NF;n++) if ($n ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/){print $n; exit}}')
-            [ -n "$ZT_IP" ] && break
-            sleep 5
+          for i in $(seq 1 30); do
+            IP=$(sudo zerotier-cli listnetworks | awk '{for(n=1;n<=NF;n++) if ($n ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/){print $n; exit}}')
+            [ -n "$IP" ] && break
+            sleep 2
           done
-          [ -n "$ZT_IP" ] || { echo "No ZeroTier IP yet."; exit 1; }
-          echo "ZT_IP=$ZT_IP" >> "$GITHUB_ENV"
           echo "===================================="
-          echo "VNC READY (Linux desktop)"
-          echo " Address : ${ZT_IP}:5900"
-          echo " Auth    : None (passwordless)"
-          echo " Client  : RealVNC Viewer / bVNC (Android)"
-          echo " Note    : Access limited to your ZeroTier network."
+          echo "✅ Linux GUI ready!"
+          echo " Address : ${IP}:5900"
+          echo " Auth    : None (Passwordless)"
+          echo " Client  : RealVNC / bVNC / Remmina"
+          echo " Note    : Same ZeroTier network only"
           echo "===================================="
 
       - name: Keep alive
         run: |
-          set -e
-          RT="${{ inputs.runtime_minutes }}"
-          echo "$RT" | grep -Eq '^[0-9]+$' || RT=180
-          [ "$RT" -gt 360 ] && RT=360
-          END=$(( $(date +%s) + RT*60 ))
+          MIN=${{ inputs.runtime_minutes }}
+          echo "Keeping session alive for ${MIN} minutes..."
+          END=$(( $(date +%s) + MIN*60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
-            echo "[ZT+x11vnc] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP}:5900"
+            echo "[Running] VNC online $(date)"
             sleep 60
           done

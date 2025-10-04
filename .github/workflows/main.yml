@@ -1,24 +1,30 @@
-name: macOS VNC via ZeroTier (fixed password)
+name: macOS VNC via ZeroTier (prompt version)
 
 on:
   workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: "VNC password (first 8 chars used)"
+        required: true
+        default: "Bullet@12345"
+      zerotier_network:
+        description: "ZeroTier Network ID"
+        required: true
 
 jobs:
   vnc:
     runs-on: macos-latest
     steps:
-      - name: Download and extract TigerVNC
+      - name: Install TigerVNC and dependencies
         run: |
           set -euo pipefail
-          curl -L -o /tmp/tigervnc.tar.gz https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.x86_64-Darwin.tar.gz/download
-          tar -xzf /tmp/tigervnc.tar.gz -C /tmp || true
+          brew install tigervnc || true
 
       - name: Set VNC password and start server (port 5900)
         run: |
           set -euo pipefail
-          brew install tigervnc || true
           mkdir -p ~/.vnc
-          echo "Bullet@12345" | vncpasswd -f > ~/.vnc/passwd
+          echo "${{ inputs.vnc_password }}" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
           nohup vncserver :0 -rfbport 5900 -SecurityTypes VncAuth &
 
@@ -26,14 +32,14 @@ jobs:
         run: |
           set -euo pipefail
           curl -s https://install.zerotier.com | bash
-          sudo zerotier-cli join <YOUR_NETWORK_ID>
+          sudo zerotier-cli join "${{ inputs.zerotier_network }}"
 
       - name: Wait for ZeroTier IP and show connect info
         run: |
           set -euo pipefail
           sleep 25
-          ip=$(zerotier-cli listpeers; ifconfig | grep -Eo "172\.[0-9]+\.[0-9]+\.[0-9]+")
-          echo "✅ Connect using a VNC client:"
-          echo "Address: $ip:5900"
-          echo "Password: Bullet@12345"
-          echo "Recommended client: Mocha VNC Lite (Android)"
+          ip=$(ifconfig | grep -Eo "172\.[0-9]+\.[0-9]+\.[0-9]+")
+          echo "✅ Connect using any VNC client:"
+          echo "Address: ${ip}:5900"
+          echo "Password: ${{ inputs.vnc_password }}"
+          echo "Recommended clients: Mocha VNC Lite (Android), RealVNC, Screens (Mac/iOS)."

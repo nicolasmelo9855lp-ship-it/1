@@ -1,4 +1,4 @@
-name: macOS VNC via ZeroTier (brew TigerVNC, robust paths)
+name: macOS VNC via ZeroTier (Apple Screen Sharing)
 
 on:
   workflow_dispatch:
@@ -20,46 +20,18 @@ jobs:
     runs-on: macos-13
     timeout-minutes: 370
     steps:
-      - name: Install TigerVNC via Homebrew and locate binaries
+      - name: Enable Apple Screen Sharing and set password
         shell: bash
         run: |
           set -euo pipefail
-          brew update >/dev/null
-          brew install tiger-vnc
-          BIN_DIR="$(brew --prefix tiger-vnc)/bin"
-          if [ ! -x "$BIN_DIR/vncserver" ] || [ ! -x "$BIN_DIR/vncpasswd" ]; then
-            echo "TigerVNC binaries not found in $BIN_DIR"
-            echo "Installed files:"
-            brew list tiger-vnc
-            exit 1
-          fi
-          echo "$BIN_DIR" > /tmp/vnc_bin_dir
-          echo "TigerVNC bin dir: $BIN_DIR"
-
-      - name: Set VNC password and start server (port 5901) + self-test
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN_DIR="$(cat /tmp/vnc_bin_dir)"
-          mkdir -p "$HOME/.vnc"
           PW="${{ inputs.vnc_password }}"
           PW="${PW:0:8}"
-          printf '%s\n' "$PW" | "$BIN_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
-          chmod 600 "$HOME/.vnc/passwd"
-          nohup "$BIN_DIR/vncserver" :1 -geometry 1280x720 -SecurityTypes VncAuth -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
-          # Wait for port 5901 to listen
-          for i in {1..30}; do
-            if lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then
-              echo "TigerVNC is listening on TCP 5901."
-              break
-            fi
-            sleep 1
-          done
-          if ! lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "VNC did not start; log tail:"
-            tail -n 120 "$HOME/vnc.log" || true
-            exit 1
-          fi
+          KS="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+          sudo "$KS" -activate -configure -access -on -allowAccessFor -allUsers -restart -agent -menu
+          sudo "$KS" -configure -clientopts -setvnclegacy -vnclegacy yes
+          sudo "$KS" -configure -setvncpw -vncpw "$PW"
+          nohup caffeinate -dimsu >/tmp/caffeinate.log 2>&1 &
+          echo "Apple Screen Sharing listening on TCP 5900"
 
       - name: Install and join ZeroTier
         shell: bash
@@ -68,10 +40,9 @@ jobs:
           curl -fL https://install.zerotier.com/ -o /tmp/zt.sh
           sudo bash /tmp/zt.sh
           sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "Joined ZeroTier: ${{ inputs.zerotier_network }}"
           echo "Authorize this member in your ZeroTier dashboard."
 
-      - name: Wait for ZeroTier IP and print connect info
+      - name: Wait for ZeroTier IP and show connect info
         shell: bash
         run: |
           set -euo pipefail
@@ -83,13 +54,12 @@ jobs:
           done
           if [ -n "$ZT_IP" ]; then
             echo "ZT_IP=$ZT_IP" >> "$GITHUB_ENV"
-            echo "===================================="
-            echo "Connect with any VNC client:"
-            echo " Address : $ZT_IP:5901"
-            echo " Password: first 8 chars you provided"
-            echo "===================================="
+            echo "Connect with an ARD-compatible VNC client:"
+            echo " Address : $ZT_IP:5900"
+            echo " Password: first 8 chars you entered"
+            echo "Recommended clients: Mocha VNC Lite (Android), Screens."
           else
-            echo "No ZeroTier IP yet. Authorize the node in dashboard, then connect to <ZT_IP>:5901"
+            echo "No ZeroTier IP yet. Authorize the node in the dashboard."
           fi
 
       - name: Keep alive
@@ -100,6 +70,6 @@ jobs:
           [ "$rt" -gt 360 ] && rt=360
           end=$(( $(date +%s) + 60*rt ))
           while [ "$(date +%s)" -lt "$end" ]; do
-            echo "[VNC+ZT] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP:-authorize}:5901"
+            echo "[ZT+AppleVNC] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP:-authorize}:5900"
             sleep 60
           done

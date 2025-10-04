@@ -1,4 +1,4 @@
-name: macOS VNC via ZeroTier (stable)
+name: macOS VNC via ZeroTier (stable, with VNC self-test)
 
 on:
   workflow_dispatch:
@@ -26,16 +26,26 @@ jobs:
           set -euo pipefail
           arch="$(uname -m)"
           if [ "$arch" = "x86_64" ]; then
-            url="https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/TigerVNC-1.13.1-x86_64-Darwin.tar.gz"
+            url="https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.x86_64-Darwin.tar.gz/download"
           else
-            url="https://downloads.sourceforge.net/project/tigervnc/stable/1.13.1/TigerVNC-1.13.1-arm64-Darwin.tar.gz"
+            url="https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1.aarch64-Darwin.tar.gz/download"
           fi
+          echo "Downloading TigerVNC from: $url"
           curl -fL -A "Mozilla/5.0" "$url" -o /tmp/tigervnc.tar.gz
+          echo "Downloaded file type:"
+          file /tmp/tigervnc.tar.gz || true
           mkdir -p /tmp/vncbin
-          tar -xzf /tmp/tigervnc.tar.gz -C /tmp/vncbin
+          # Try standard extract, then a gzip fallback if SF serves odd headers
+          tar -xzf /tmp/tigervnc.tar.gz -C /tmp/vncbin \
+          || gzip -dc /tmp/tigervnc.tar.gz | tar -xf - -C /tmp/vncbin
+          # Locate the directory that contains vncserver (and vncpasswd)
           VNC_DIR="$(find /tmp/vncbin -type f -name vncserver -maxdepth 3 -print -quit | xargs dirname)"
+          if [ -z "$VNC_DIR" ] || [ ! -x "$VNC_DIR/vncserver" ]; then
+            echo "Could not find vncserver after extract."
+            exit 1
+          fi
           echo "$VNC_DIR" > /tmp/vnc_path.txt
-          test -x "$VNC_DIR/vncserver"
+          echo "TigerVNC extracted; bin dir: $VNC_DIR"
 
       - name: Set VNC password and start server (port 5901)
         shell: bash
@@ -45,11 +55,31 @@ jobs:
           mkdir -p "$HOME/.vnc"
           PW="${{ inputs.vnc_password }}"
           PW="${PW:0:8}"
-          printf '%s\n' "$PW" | "$VNC_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
+          if [ -x "$VNC_DIR/vncpasswd" ]; then
+            printf '%s\n' "$PW" | "$VNC_DIR/vncpasswd" -f > "$HOME/.vnc/passwd"
+          else
+            # Fallback: try the system vncpasswd if present
+            if command -v vncpasswd >/dev/null 2>&1; then
+              printf '%s\n' "$PW" | vncpasswd -f > "$HOME/.vnc/passwd"
+            else
+              echo "No vncpasswd found; cannot create password file."
+              exit 1
+            fi
+          fi
           chmod 600 "$HOME/.vnc/passwd"
           nohup "$VNC_DIR/vncserver" :1 -geometry 1280x720 -rfbauth "$HOME/.vnc/passwd" > "$HOME/vnc.log" 2>&1 &
-          sleep 5
-          echo "TigerVNC started on :1 (TCP 5901)."
+          # Self-test: wait up to 30s for port 5901 to listen
+          ok=0
+          for i in {1..30}; do
+            if lsof -iTCP:5901 -sTCP:LISTEN >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "VNC did not start listening on 5901. Log tail:"
+            tail -n 80 "$HOME/vnc.log" || true
+            exit 1
+          fi
+          echo "TigerVNC is listening on TCP 5901."
 
       - name: Install and join ZeroTier
         shell: bash
@@ -58,23 +88,28 @@ jobs:
           curl -fL https://install.zerotier.com/ -o /tmp/zt.sh
           sudo bash /tmp/zt.sh
           sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "Authorize this member in the ZeroTier dashboard."
+          echo "Joined ZeroTier: ${{ inputs.zerotier_network }}"
+          echo "Authorize this member in your ZeroTier dashboard."
 
-      - name: Wait for ZeroTier IP
+      - name: Wait for ZeroTier IP and print connect info
         shell: bash
         run: |
           set -euo pipefail
+          ZT_IP=""
           for i in {1..24}; do
-            IP="$(sudo zerotier-cli listnetworks 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
-            [ -n "$IP" ] && break
+            ZT_IP="$(sudo zerotier-cli listnetworks 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)"
+            [ -n "$ZT_IP" ] && break
             sleep 5
           done
-          if [ -n "$IP" ]; then
-            echo "ZT_IP=$IP" >> "$GITHUB_ENV"
-            echo "Connect VNC client to: $IP:5901"
-            echo "Password: first 8 chars you entered"
+          if [ -n "$ZT_IP" ]; then
+            echo "ZT_IP=$ZT_IP" >> "$GITHUB_ENV"
+            echo "===================================="
+            echo "Connect with any VNC client:"
+            echo " Address : $ZT_IP:5901"
+            echo " Password: first 8 chars you provided"
+            echo "===================================="
           else
-            echo "No ZeroTier IP yet. Authorize the node in dashboard."
+            echo "No ZeroTier IP yet. Authorize this node in dashboard, then connect to <ZT_IP>:5901"
           fi
 
       - name: Keep alive

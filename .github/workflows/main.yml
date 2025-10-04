@@ -1,17 +1,17 @@
-name: macOS VNC via ZeroTier (no brew issues)
+name: macOS VNC via ZeroTier (fixed TigerVNC tarball)
 
 on:
   workflow_dispatch:
     inputs:
       zerotier_network:
-        description: "ZeroTier Network ID from https://my.zerotier.com"
+        description: "ZeroTier Network ID (from https://my.zerotier.com)"
         required: true
       vnc_password:
         description: "VNC password (max 8 chars)"
         required: false
         default: "12345678"
       runtime_minutes:
-        description: "Keep-alive time (max 360)"
+        description: "Keep-alive runtime (max 360)"
         required: false
         default: "120"
 
@@ -20,15 +20,15 @@ jobs:
     runs-on: macos-13
     timeout-minutes: 370
     steps:
-      - name: Download TigerVNC (prebuilt binary)
+      - name: Download and extract TigerVNC
         shell: bash
         run: |
           set -e
           cd /tmp
           echo "Downloading TigerVNC..."
-          curl -L -o tigervnc.zip https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/TigerVNC-1.13.1-universal.zip
-          unzip tigervnc.zip
-          mv TigerVNC-1.13.1-universal vncbin
+          curl -L -o tigervnc.tar.gz https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/TigerVNC-1.13.1-x86_64-Darwin.tar.gz/download
+          tar -xzf tigervnc.tar.gz
+          mv TigerVNC-1.13.1-x86_64-Darwin vncbin
           echo "✅ TigerVNC extracted to /tmp/vncbin"
 
       - name: Set VNC password and start server
@@ -41,7 +41,6 @@ jobs:
           echo -n "$VNC_PW" > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
           echo "Password file created."
-
           echo "Starting TigerVNC..."
           /tmp/vncbin/vncserver :1 -geometry 1280x720 -rfbauth "$HOME/.vnc/passwd" &
           sleep 5
@@ -55,8 +54,8 @@ jobs:
           sudo bash zt.sh
           sudo zerotier-cli status || true
           sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "✅ Joined ZeroTier: ${{ inputs.zerotier_network }}"
-          echo "Authorize this device on https://my.zerotier.com"
+          echo "✅ Joined ZeroTier network: ${{ inputs.zerotier_network }}"
+          echo "Authorize this member in your dashboard."
 
       - name: Wait for ZeroTier IP
         shell: bash
@@ -72,7 +71,7 @@ jobs:
             sleep 5
           done
           if [ -z "${IP:-}" ]; then
-            echo "⚠ No IP yet — authorize in dashboard first."
+            echo "⚠ No ZeroTier IP yet. Authorize the device first."
           fi
 
       - name: Keep alive
@@ -83,6 +82,6 @@ jobs:
           (( rt > 360 )) && rt=360
           end=$(( $(date +%s) + 60 * rt ))
           while (( $(date +%s) < end )); do
-            echo "[VNC+ZT] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP:-waiting}:5901"
+            echo "[VNC+ZeroTier] Heartbeat $(date '+%H:%M:%S') | ${ZT_IP:-pending}:5901"
             sleep 60
           done

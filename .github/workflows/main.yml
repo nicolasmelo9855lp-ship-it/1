@@ -1,14 +1,14 @@
-name: Kali-like Desktop via ZeroTier (VNC)
+name: Kali XFCE via ZeroTier (macOS look)
 
 on:
   workflow_dispatch:
     inputs:
-      zt_network:     { description: "ZeroTier Network ID (16 hex chars)", required: true }
-      zt_api_token:   { description: "ZeroTier API token (optional auto-authorize)", required: false }
-      vnc_password:   { description: "VNC password (blank = none)", required: false, default: "" }
-      width:          { description: "Screen width",  required: false, default: "1366" }
-      height:         { description: "Screen height", required: false, default: "768" }
-      minutes:        { description: "Keepalive (max 355)", required: false, default: "180" }
+      zt_network:   { description: "ZeroTier Network ID", required: true }
+      zt_api_token: { description: "ZeroTier API Token (optional)", required: false }
+      vnc_password: { description: "VNC password (blank = passwordless)", required: false, default: "" }
+      width:        { description: "Screen width",  required: false, default: "1366" }
+      height:       { description: "Screen height", required: false, default: "768" }
+      minutes:      { description: "Session duration (max 355)", required: false, default: "180" }
 
 jobs:
   kali:
@@ -16,59 +16,103 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Normalize inputs
-        run: |
-          W="${{ github.event.inputs.width  || '1366' }}"
-          H="${{ github.event.inputs.height || '768'  }}"
-          M="${{ github.event.inputs.minutes || '180' }}"
-          if ! echo "$M" | grep -Eq '^[0-9]+$'; then M=180; fi
-          [ "$M" -gt 355 ] && M=355
-          echo "W=$W" >> $GITHUB_ENV
-          echo "H=$H" >> $GITHUB_ENV
-          echo "MIN=$M" >> $GITHUB_ENV
-
-      - name: Install XFCE desktop + VNC + common Kali tools
+      - name: Install XFCE, VNC, tools
         run: |
           set -e
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            xfce4 xfce4-goodies x11vnc xvfb dbus-x11 xterm curl jq \
-            # common tools available on Ubuntu
-            nmap sqlmap hydra john gobuster nikto \
-            hashcat wordlists dirb dnsutils net-tools tcpdump \
-            tshark # (Wireshark CLI)
-          # Kali flavor wallpaper
-          mkdir -p "$HOME/Pictures"
-          curl -fsSL -o "$HOME/Pictures/kali-wall.jpg" https://www.kali.org/images/kali-dragon-icon.svg || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 xfce4-goodies x11vnc xvfb dbus-x11 xterm curl jq git unzip ca-certificates \
+            plank fonts-inter gsettings-desktop-schemas \
+            nmap sqlmap hydra john gobuster nikto hashcat dirb wordlists tcpdump tshark
+          echo "XFCE + tools installed."
 
-      - name: Start virtual display and XFCE
+      - name: Apply macOS theme (WhiteSur)
         run: |
+          set -e
+          mkdir -p ~/.themes ~/.icons ~/bin ~/Pictures
+
+          # Themes & icons from Vinceliuice’s repos
+          git clone --depth=1 https://github.com/vinceliuice/WhiteSur-gtk-theme ~/WhiteSur-gtk-theme
+          git clone --depth=1 https://github.com/vinceliuice/WhiteSur-icon-theme ~/WhiteSur-icon-theme
+          git clone --depth=1 https://github.com/vinceliuice/McMojave-cursors ~/McMojave-cursors
+
+          # Install themes/icons/cursors into home (no sudo needed)
+          bash ~/WhiteSur-gtk-theme/install.sh -t ~/.themes -c light -c dark -N "WhiteSur"
+          bash ~/WhiteSur-icon-theme/install.sh -d ~/.icons -a -s 22 -s 24 -s 32
+          bash ~/McMojave-cursors/install.sh -d ~/.icons
+
+          # Wallpaper (macOS-like)
+          curl -fsSL -o ~/Pictures/wall.jpg \
+            https://raw.githubusercontent.com/adi1090x/wallpapers/master/apple/007.jpg || true
+
+          # Autostart Plank (dock)
+          mkdir -p ~/.config/autostart
+          cat > ~/.config/autostart/plank.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Exec=plank
+          Hidden=false
+          NoDisplay=false
+          X-GNOME-Autostart-enabled=true
+          Name=Plank
+          Comment=Simple dock
+          EOF
+
+          # XFCE appearance + panel tweaks
           export DISPLAY=:0
-          Xvfb :0 -screen 0 ${W}x${H}x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          # If not running yet, a later step starts DISPLAY; we also write XFCE config files
+          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
+
+          # Set theme/icon/cursor via xfconf at session start (create xprofile)
+          cat > ~/.xprofile <<'EOS'
+          export DISPLAY=:0
+          # GTK theme & icons
+          xfconf-query -c xsettings -p /Net/ThemeName -s "WhiteSur-Dark" || true
+          xfconf-query -c xsettings -p /Net/IconThemeName -s "WhiteSur" || true
+          xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "McMojave-cursors" || true
+          xfconf-query -c xsettings -p /Gtk/FontName -s "Inter 10" || true
+          # Wallpaper
+          xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/image-path -s "$HOME/Pictures/wall.jpg" || true
+          xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/image-show -t bool -s true -n || true
+          # Panel at top like mac menu bar
+          xfconf-query -c xfce4-panel -p /panels -t int -s 1 -a || true
+          xfconf-query -c xfce4-panel -p /panels/panel-1/position -s "p=6;x=0;y=0" || true   # top
+          xfconf-query -c xfce4-panel -p /panels/panel-1/size -t int -s 28 -n || true
+          EOS
+          chmod +x ~/.xprofile
+
+          echo "WhiteSur theme + icons + cursors + Plank configured."
+
+      - name: Start virtual display + XFCE
+        run: |
+          set -e
+          export DISPLAY=:0
+          Xvfb :0 -screen 0 "${{ github.event.inputs.width }}x${{ github.event.inputs.height }}x24" -nolisten tcp >/tmp/xvfb.log 2>&1 &
           sleep 3
+          # source ~/.xprofile once the session starts
           dbus-launch startxfce4 >/tmp/xfce.log 2>&1 &
-          sleep 6
+          sleep 8
+          # apply look after session comes up
+          [ -f ~/.xprofile ] && bash ~/.xprofile || true
+          echo "DISPLAY ready."
 
       - name: Start VNC server (passworded or passwordless)
         run: |
+          set -e
           export DISPLAY=:0
-          PW="${{ github.event.inputs.vnc_password }}"
-          if [ -n "$PW" ]; then
-            x11vnc -storepasswd "$PW" "$HOME/.vncpass"
-            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth "$HOME/.vncpass" \
-                   -repeat -noxfixes -noxdamage -noxrecord >/tmp/x11vnc.log 2>&1 &
+          if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
+            x11vnc -storepasswd "${{ github.event.inputs.vnc_password }}" ~/.vncpass
+            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth ~/.vncpass -noxfixes -noxdamage -noxrecord -bg
           else
-            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw \
-                   -repeat -noxfixes -noxdamage -noxrecord >/tmp/x11vnc.log 2>&1 &
+            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw -noxfixes -noxdamage -noxrecord -bg
           fi
-          sleep 2
+          echo "x11vnc up on :5900"
 
       - name: Install and join ZeroTier
         run: |
           curl -s https://install.zerotier.com/ | sudo bash
           sudo zerotier-cli join "${{ github.event.inputs.zt_network }}"
-          for i in {1..30}; do sudo zerotier-cli info && break; sleep 1; done
-          sudo zerotier-cli listnetworks
+          for i in {1..30}; do sleep 2; sudo zerotier-cli listnetworks && break; done
 
       - name: Auto-authorize member (optional)
         if: ${{ github.event.inputs.zt_api_token != '' }}
@@ -76,31 +120,32 @@ jobs:
           NET="${{ github.event.inputs.zt_network }}"
           TOK="${{ github.event.inputs.zt_api_token }}"
           NODE=$(sudo zerotier-cli info -j | jq -r .address)
-          curl -fsSL -X POST \
-            -H "Authorization: token $TOK" \
-            -H 'Content-Type: application/json' \
+          curl -fsSL -X POST -H "Authorization: token $TOK" \
+            -H "Content-Type: application/json" \
             -d '{"config":{"authorized":true}}' \
-            "https://api.zerotier.com/api/v1/network/${NET}/member/${NODE}" >/dev/null || true
+            "https://api.zerotier.com/api/v1/network/${NET}/member/${NODE}" || true
 
       - name: Show connect info
         run: |
           ZTIP=$(ip -4 -o addr show | awk '/zt/{print $4}' | cut -d/ -f1 | head -n1)
           echo ""
-          echo "=========== Kali-like VNC on GitHub Runner ==========="
-          echo "Connect with any VNC client (RealVNC, bVNC, Mocha):"
+          echo "============== Connect =============="
+          echo "Use any VNC client (Android: bVNC/RealVNC):"
           echo "  Host : ${ZTIP}:5900"
           if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
-            echo "  Pass : (the one you entered)"
+            echo "  Pass : ${{ github.event.inputs.vnc_password }}"
           else
             echo "  Pass : none (passwordless)"
           fi
-          echo "Tools preinstalled: nmap, sqlmap, hydra, john, gobuster, nikto, hashcat, wordlists, dirb, tshark"
-          echo "======================================================="
-          tail -n 30 /tmp/x11vnc.log || true
+          echo "Theme : WhiteSur (macOS style) + Plank dock"
+          echo "====================================="
 
-      - name: Keep alive
+      - name: Keepalive
         run: |
-          for i in $(seq 1 ${MIN}); do
-            echo "Desktop alive ($i/${MIN}) — connect via ZeroTier port 5900"
+          MIN=${{ github.event.inputs.minutes }}
+          [ -z "$MIN" ] && MIN=180
+          [ "$MIN" -gt 355 ] && MIN=355
+          for i in $(seq 1 "$MIN"); do
+            echo "Desktop alive ($i/$MIN) — connect via ZeroTier:5900"
             sleep 60
           done

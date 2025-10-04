@@ -11,7 +11,7 @@ on:
         required: true
         default: "Bullet@12345"
       runtime_minutes:
-        description: "Keep-alive minutes (max 360)"
+        description: "Keep-alive minutes (<=360)"
         required: false
         default: "180"
 
@@ -19,44 +19,31 @@ jobs:
   vnc:
     runs-on: macos-13
     timeout-minutes: 370
-
     steps:
-      - name: Enable Apple Screen Sharing (VNC legacy) and set password
+      - name: Enable Apple Screen Sharing and set password
         shell: bash
         run: |
           set -euo pipefail
-
-          # ARD/VNC only uses first 8 chars
-          PW="${{ inputs.vnc_password }}"
-          PW8="${PW:0:8}"
-          echo "Using first 8 chars for ARD VNC auth."
-
+          PW='${{ inputs.vnc_password }}'
+          PW8=$(printf "%s" "$PW" | cut -c1-8)
           KS="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-
-          # Turn on ARD + allow all users; enable 'legacy' VNC and set password
           sudo "$KS" -activate -configure -access -on -allowAccessFor -allUsers -restart -agent -menu
           sudo "$KS" -configure -clientopts -setvnclegacy -vnclegacy yes
           sudo "$KS" -configure -setvncpw -vncpw "$PW8"
-
-          # Keep display awake
           nohup caffeinate -dimsu >/tmp/caffeinate.log 2>&1 &
+          echo "Apple Screen Sharing enabled (port 5900)."
 
-          echo "Screen Sharing enabled on TCP 5900 (ARD VNC)."
-
-      - name: Self-test: wait for port 5900 to listen
+      - name: Wait for port 5900
         shell: bash
         run: |
           set -euo pipefail
-          ok=0
-          for i in {1..30}; do
-            if nc -z 127.0.0.1 5900 2>/dev/null; then ok=1; break; fi
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 5900 2>/dev/null; then
+              echo "VNC ready."; exit 0
+            fi
             sleep 1
           done
-          if [ "$ok" -ne 1 ]; then
-            echo "VNC did not open port 5900. Exiting."
-            exit 1
-          fi
-          echo "VNC port 5900 is listening."
+          echo "VNC port 5900 did not open in time."; exit 1
 
       - name: Install and join ZeroTier
         shell: bash
@@ -64,46 +51,41 @@ jobs:
           set -euo pipefail
           curl -fL https://install.zerotier.com/ -o /tmp/zt.sh
           sudo bash /tmp/zt.sh
-          sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-          echo "Joined ZeroTier. Authorize this member in your ZeroTier dashboard."
+          sudo zerotier-cli join '${{ inputs.zerotier_network }}'
+          echo "Joined ZeroTier. Authorize this member in the dashboard."
 
-      - name: Wait for ZeroTier IP and show connection info
+      - name: Show connection info
         shell: bash
         run: |
           set -euo pipefail
-          # Wait up to 2 minutes for an assigned ZT IP (usually 10.x or 172.26/28…)
           ZT_IP=""
-          for i in {1..24}; do
-            # Try API, then ifconfig scan
-            ZT_IP="$(sudo zerotier-cli listnetworks 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/) {print $i; exit}}')"
-            [ -z "$ZT_IP" ] && ZT_IP="$(ifconfig | grep -Eo '((10|172)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})' | head -n1 || true)"
+          for i in $(seq 1 24); do
+            ZT_IP=$(ifconfig | grep -Eo '((10|172)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})' | head -n1 || true)
             [ -n "$ZT_IP" ] && break
             sleep 5
           done
-
-          PW="${{ inputs.vnc_password }}"
-          PW8="${PW:0:8}"
-
+          PW='${{ inputs.vnc_password }}'
+          PW8=$(printf "%s" "$PW" | cut -c1-8)
           echo "===================================="
           if [ -n "$ZT_IP" ]; then
             echo "Connect with an ARD-compatible VNC client:"
-            echo " Address : $ZT_IP:5900"
+            echo " Address : ${ZT_IP}:5900"
           else
-            echo "No ZeroTier IP yet. Authorize the node, then use its ZT IP on port 5900."
+            echo "No ZeroTier IP yet — authorize the node, then use its ZT IP on port 5900."
           fi
-          echo " Password: $PW8   (ARD uses FIRST 8 CHARS)"
-          echo " Recommended Android clients: Mocha VNC Lite, Screens."
+          echo " Password: ${PW8}  (ARD uses FIRST 8 CHARS)"
+          echo "Recommended Android clients: Mocha VNC Lite, Screens."
           echo "===================================="
 
       - name: Keep alive
         shell: bash
         run: |
           set -euo pipefail
-          rt="${{ inputs.runtime_minutes }}"
-          case "$rt" in (''|*[!0-9]*) rt=180;; esac
-          [ "$rt" -gt 360 ] && rt=360
-          end=$(( $(date +%s) + 60*rt ))
-          while [ "$(date +%s)" -lt "$end" ]; do
+          RT='${{ inputs.runtime_minutes }}'
+          echo "$RT" | grep -Eq '^[0-9]+$' || RT=180
+          [ "$RT" -gt 360 ] && RT=360
+          END=$(( $(date +%s) + RT*60 ))
+          while [ "$(date +%s)" -lt "$END" ]; do
             echo "[ZT+AppleVNC] Heartbeat $(date '+%H:%M:%S')"
             sleep 60
           done

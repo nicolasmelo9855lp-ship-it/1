@@ -1,98 +1,100 @@
-name: Linux VNC via ZeroTier (Full GUI + Passwordless + Auto Fix)
+name: Kali Linux Desktop via ZeroTier (VNC)
 
 on:
   workflow_dispatch:
     inputs:
-      zerotier_network:
-        description: ZeroTier Network ID (from my.zerotier.com)
+      zt_network:
+        description: "ZeroTier Network ID (16-digit)"
         required: true
-      zerotier_api_token:
-        description: ZeroTier API Token (masked)
-        required: true
-      runtime_minutes:
-        description: Keep alive duration (minutes)
+      zt_api_token:
+        description: "ZeroTier API Token (optional)"
+        required: false
+      vnc_password:
+        description: "VNC password (leave blank for none)"
+        required: false
+        default: ""
+      minutes:
+        description: "Keepalive time (max 355)"
         required: false
         default: "180"
 
 jobs:
-  vnc:
-    runs-on: ubuntu-22.04
+  kali:
+    runs-on: ubuntu-latest
     timeout-minutes: 370
 
     steps:
-      - name: Install full desktop + VNC tools
+      - name: Install Kali desktop environment
         run: |
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies tightvncserver x11vnc xvfb openbox \
-            lxde-core lxterminal dbus-x11 net-tools curl jq
-          sudo apt-get clean
+          sudo apt-get install -y curl jq x11vnc xvfb dbus-x11 xfce4 xfce4-goodies kali-desktop-xfce --no-install-recommends
+          mkdir -p ~/Pictures
+          curl -fsSL -o ~/Pictures/kali.jpg https://www.kali.org/images/kali-linux-logo.svg || true
 
-      - name: Start virtual desktop (Xvfb + LXDE)
+      - name: Start virtual display + XFCE
         run: |
           export DISPLAY=:0
           Xvfb :0 -screen 0 1366x768x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
           sleep 3
-          startlxde >/tmp/lxde.log 2>&1 &
-          sleep 5
-          echo "Desktop session started."
+          startxfce4 >/tmp/xfce.log 2>&1 &
+          sleep 6
 
-      - name: Start x11vnc (passwordless) with retry
+      - name: Start VNC server
         run: |
           export DISPLAY=:0
-          x11vnc -display :0 -rfbport 5900 -forever -shared -nopw -ncache 10 \
-                 -o /tmp/x11vnc.log >/dev/null 2>&1 &
-          for i in $(seq 1 40); do
-            ss -ltn | grep -q ':5900' && { echo "✅ VNC running on port 5900"; break; }
-            sleep 2
-          done
-          ss -ltn | grep -q ':5900' || { echo "❌ VNC did not start, retrying with TigerVNC..."; }
-          sudo vncserver :1 -geometry 1366x768 -SecurityTypes None || true
+          PW="${{ github.event.inputs.vnc_password }}"
+          if [ -n "$PW" ]; then
+            x11vnc -storepasswd "$PW" ~/.vncpass
+            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth ~/.vncpass >/tmp/x11vnc.log 2>&1 &
+          else
+            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw >/tmp/x11vnc.log 2>&1 &
+          fi
+          sleep 3
+          echo "✅ VNC server listening on port 5900"
 
       - name: Install and join ZeroTier
         run: |
-          curl -fsSL https://install.zerotier.com/ -o /tmp/zt.sh
-          sudo bash /tmp/zt.sh
-          sudo zerotier-cli join "${{ inputs.zerotier_network }}"
-
-      - name: Authorize this device automatically
-        env:
-          ZT_NET: ${{ inputs.zerotier_network }}
-          ZT_TOKEN: ${{ inputs.zerotier_api_token }}
-        run: |
-          NODE_ID=$(sudo zerotier-cli -j info | jq -r '.address')
-          API="https://api.zerotier.com/api/v1/network/${ZT_NET}/member/${NODE_ID}"
-          PAY='{"config":{"authorized":true}}'
-          for method in POST PUT; do
-            code=$(curl -sS -o /tmp/zt.json -w "%{http_code}" \
-                   -H "Authorization: bearer ${ZT_TOKEN}" \
-                   -H "Content-Type: application/json" \
-                   -X $method "$API" -d "$PAY" || true)
-            [ "$code" -ge 200 ] && [ "$code" -lt 300 ] && break
+          curl -s https://install.zerotier.com/ | sudo bash
+          sudo zerotier-cli join "${{ github.event.inputs.zt_network }}"
+          for i in {1..30}; do
+            sudo zerotier-cli info && break
+            sleep 1
           done
-          echo "ZeroTier auth status: $code"
+          sudo zerotier-cli listnetworks
 
-      - name: Display VNC connection info
+      - name: Authorize device automatically (optional)
+        if: ${{ github.event.inputs.zt_api_token != '' }}
         run: |
-          for i in $(seq 1 30); do
-            IP=$(sudo zerotier-cli listnetworks | awk '{for(n=1;n<=NF;n++) if ($n ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/){print $n; exit}}')
-            [ -n "$IP" ] && break
-            sleep 2
-          done
-          echo "===================================="
-          echo "✅ Linux GUI ready!"
-          echo " Address : ${IP}:5900"
-          echo " Auth    : None (Passwordless)"
-          echo " Client  : RealVNC / bVNC / Remmina"
-          echo " Note    : Same ZeroTier network only"
-          echo "===================================="
+          NET="${{ github.event.inputs.zt_network }}"
+          TOKEN="${{ github.event.inputs.zt_api_token }}"
+          NODE=$(sudo zerotier-cli info -j | jq -r .address)
+          curl -fsSL -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"config":{"authorized":true}}' \
+            "https://api.zerotier.com/api/v1/network/${NET}/member/${NODE}" >/dev/null || true
 
-      - name: Keep alive
+      - name: Show connection info
         run: |
-          MIN=${{ inputs.runtime_minutes }}
-          echo "Keeping session alive for ${MIN} minutes..."
-          END=$(( $(date +%s) + MIN*60 ))
-          while [ "$(date +%s)" -lt "$END" ]; do
-            echo "[Running] VNC online $(date)"
+          IP=$(ip -4 -o addr show | awk '/zt/{print $4}' | cut -d/ -f1 | head -n1)
+          echo ""
+          echo "================ Kali VNC ================"
+          echo "Connect using any VNC client:"
+          echo "  Host : ${IP}:5900"
+          if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
+            echo "  Pass : (the one you entered)"
+          else
+            echo "  Pass : none (passwordless)"
+          fi
+          echo "Client examples: RealVNC, bVNC, Mocha VNC"
+          echo "=========================================="
+          tail -n 15 /tmp/x11vnc.log || true
+
+      - name: Keepalive
+        run: |
+          MIN=${{ github.event.inputs.minutes }}
+          [ "$MIN" -gt 355 ] && MIN=355
+          for i in $(seq 1 "$MIN"); do
+            echo "Kali Desktop alive ($i/$MIN) — connect via ZeroTier port 5900"
             sleep 60
           done

@@ -1,14 +1,12 @@
-name: Kali XFCE via ZeroTier (macOS look, fixed)
+name: Kali XFCE + macOS Theme via ZeroTier
 
 on:
   workflow_dispatch:
     inputs:
       zt_network:   { description: "ZeroTier Network ID", required: true }
       zt_api_token: { description: "ZeroTier API Token (optional)", required: false }
-      vnc_password: { description: "VNC password (blank = passwordless)", required: false, default: "" }
-      width:        { description: "Screen width",  required: false, default: "1366" }
-      height:       { description: "Screen height", required: false, default: "768" }
-      minutes:      { description: "Session duration (max 355)", required: false, default: "180" }
+      vnc_password: { description: "VNC password (leave blank for passwordless)", required: false, default: "" }
+      minutes:      { description: "Session runtime (max 355)", required: false, default: "180" }
 
 jobs:
   kali:
@@ -16,26 +14,24 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install XFCE, VNC, tools (fixed)
+      - name: Install XFCE + VNC + tools
         run: |
-          set -e
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-goodies x11vnc xvfb dbus-x11 xterm curl jq git unzip ca-certificates \
-            plank fonts-inter gsettings-desktop-schemas nmap hydra john hashcat tcpdump tshark \
-            net-tools neofetch htop
-          echo "XFCE and utilities installed."
+            xfce4 xfce4-goodies x11vnc xvfb dbus-x11 curl jq git plank ca-certificates \
+            fonts-inter gsettings-desktop-schemas neofetch htop net-tools
+          echo "✅ XFCE & utilities installed successfully."
 
-      - name: Apply macOS theme (WhiteSur)
+      - name: Apply macOS WhiteSur Theme (fixed)
         run: |
           set -e
-          mkdir -p ~/.themes ~/.icons ~/Pictures ~/.config/autostart
+          mkdir -p ~/.themes ~/.icons ~/.config/autostart ~/Pictures
           git clone --depth=1 https://github.com/vinceliuice/WhiteSur-gtk-theme ~/WhiteSur-gtk-theme
           git clone --depth=1 https://github.com/vinceliuice/WhiteSur-icon-theme ~/WhiteSur-icon-theme
           git clone --depth=1 https://github.com/vinceliuice/McMojave-cursors ~/McMojave-cursors
-          bash ~/WhiteSur-gtk-theme/install.sh -t ~/.themes -c dark
-          bash ~/WhiteSur-icon-theme/install.sh -d ~/.icons
-          bash ~/McMojave-cursors/install.sh -d ~/.icons
+          sudo bash ~/WhiteSur-gtk-theme/install.sh -c dark
+          sudo bash ~/WhiteSur-icon-theme/install.sh
+          sudo bash ~/McMojave-cursors/install.sh
           curl -fsSL -o ~/Pictures/wall.jpg https://raw.githubusercontent.com/adi1090x/wallpapers/master/apple/007.jpg || true
           cat > ~/.config/autostart/plank.desktop <<'EOF'
           [Desktop Entry]
@@ -45,14 +41,14 @@ jobs:
           NoDisplay=false
           X-GNOME-Autostart-enabled=true
           Name=Plank
-          Comment=Simple dock
+          Comment=macOS-style dock
           EOF
+          echo "✅ WhiteSur theme applied."
 
-      - name: Start virtual display + XFCE
+      - name: Start XFCE Desktop Display
         run: |
-          set -e
           export DISPLAY=:0
-          Xvfb :0 -screen 0 "${{ github.event.inputs.width }}x${{ github.event.inputs.height }}x24" -nolisten tcp &
+          Xvfb :0 -screen 0 1366x768x24 -nolisten tcp &
           sleep 3
           dbus-launch startxfce4 >/tmp/xfce.log 2>&1 &
           sleep 8
@@ -60,26 +56,28 @@ jobs:
           xfconf-query -c xsettings -p /Net/IconThemeName -s "WhiteSur" || true
           xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "McMojave-cursors" || true
           xfconf-query -c xfce4-desktop -p /backdrop/screen0/monitor0/image-path -s "$HOME/Pictures/wall.jpg" || true
-          echo "XFCE desktop with macOS look ready."
+          echo "✅ XFCE desktop started."
 
-      - name: Start VNC server (passworded or passwordless)
+      - name: Start VNC Server (password or passwordless)
         run: |
           export DISPLAY=:0
           if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
             x11vnc -storepasswd "${{ github.event.inputs.vnc_password }}" ~/.vncpass
-            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth ~/.vncpass -noxdamage -bg
+            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth ~/.vncpass -bg -noxdamage
           else
-            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw -noxdamage -bg
+            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw -bg -noxdamage
           fi
+          echo "✅ VNC server running on port 5900."
 
-      - name: Install and join ZeroTier
+      - name: Install and Join ZeroTier
         run: |
           curl -s https://install.zerotier.com/ | sudo bash
           sudo zerotier-cli join "${{ github.event.inputs.zt_network }}"
           sleep 10
           sudo zerotier-cli listnetworks
+          echo "✅ Joined ZeroTier network."
 
-      - name: Auto-authorize member (optional)
+      - name: Auto-Authorize Node (optional)
         if: ${{ github.event.inputs.zt_api_token != '' }}
         run: |
           NET="${{ github.event.inputs.zt_network }}"
@@ -89,23 +87,24 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"config":{"authorized":true}}' \
             "https://api.zerotier.com/api/v1/network/${NET}/member/${NODE}" || true
+          echo "✅ Auto-authorized in ZeroTier."
 
-      - name: Show connect info
+      - name: Show Connection Info
         run: |
           IP=$(ip -4 -o addr show | awk '/zt/{print $4}' | cut -d/ -f1 | head -n1)
-          echo "============== Connect =============="
-          echo "VNC address: ${IP}:5900"
+          echo "=========================="
+          echo "🖥️  Kali XFCE + macOS Theme"
+          echo "VNC Address: ${IP}:5900"
           if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
-            echo "Password   : ${{ github.event.inputs.vnc_password }}"
+            echo "Password: ${{ github.event.inputs.vnc_password }}"
           else
-            echo "Password   : none (passwordless)"
+            echo "Password: none (passwordless)"
           fi
-          echo "Theme      : WhiteSur macOS look"
-          echo "====================================="
+          echo "=========================="
 
-      - name: Keepalive
+      - name: Keep Alive
         run: |
           for i in $(seq 1 ${{ github.event.inputs.minutes || 180 }}); do
-            echo "Kali XFCE running ($i min) — connect via ZeroTier VNC"
+            echo "🕒 Running... ($i min)"
             sleep 60
           done

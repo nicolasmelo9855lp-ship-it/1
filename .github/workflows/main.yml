@@ -1,100 +1,106 @@
-name: Kali Linux Desktop via ZeroTier (VNC)
+name: Kali-like Desktop via ZeroTier (VNC)
 
 on:
   workflow_dispatch:
     inputs:
-      zt_network:
-        description: "ZeroTier Network ID (16-digit)"
-        required: true
-      zt_api_token:
-        description: "ZeroTier API Token (optional)"
-        required: false
-      vnc_password:
-        description: "VNC password (leave blank for none)"
-        required: false
-        default: ""
-      minutes:
-        description: "Keepalive time (max 355)"
-        required: false
-        default: "180"
+      zt_network:     { description: "ZeroTier Network ID (16 hex chars)", required: true }
+      zt_api_token:   { description: "ZeroTier API token (optional auto-authorize)", required: false }
+      vnc_password:   { description: "VNC password (blank = none)", required: false, default: "" }
+      width:          { description: "Screen width",  required: false, default: "1366" }
+      height:         { description: "Screen height", required: false, default: "768" }
+      minutes:        { description: "Keepalive (max 355)", required: false, default: "180" }
 
 jobs:
   kali:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
+    timeout-minutes: 360
 
     steps:
-      - name: Install Kali desktop environment
+      - name: Normalize inputs
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl jq x11vnc xvfb dbus-x11 xfce4 xfce4-goodies kali-desktop-xfce --no-install-recommends
-          mkdir -p ~/Pictures
-          curl -fsSL -o ~/Pictures/kali.jpg https://www.kali.org/images/kali-linux-logo.svg || true
+          W="${{ github.event.inputs.width  || '1366' }}"
+          H="${{ github.event.inputs.height || '768'  }}"
+          M="${{ github.event.inputs.minutes || '180' }}"
+          if ! echo "$M" | grep -Eq '^[0-9]+$'; then M=180; fi
+          [ "$M" -gt 355 ] && M=355
+          echo "W=$W" >> $GITHUB_ENV
+          echo "H=$H" >> $GITHUB_ENV
+          echo "MIN=$M" >> $GITHUB_ENV
 
-      - name: Start virtual display + XFCE
+      - name: Install XFCE desktop + VNC + common Kali tools
+        run: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            xfce4 xfce4-goodies x11vnc xvfb dbus-x11 xterm curl jq \
+            # common tools available on Ubuntu
+            nmap sqlmap hydra john gobuster nikto \
+            hashcat wordlists dirb dnsutils net-tools tcpdump \
+            tshark # (Wireshark CLI)
+          # Kali flavor wallpaper
+          mkdir -p "$HOME/Pictures"
+          curl -fsSL -o "$HOME/Pictures/kali-wall.jpg" https://www.kali.org/images/kali-dragon-icon.svg || true
+
+      - name: Start virtual display and XFCE
         run: |
           export DISPLAY=:0
-          Xvfb :0 -screen 0 1366x768x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          Xvfb :0 -screen 0 ${W}x${H}x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
           sleep 3
-          startxfce4 >/tmp/xfce.log 2>&1 &
+          dbus-launch startxfce4 >/tmp/xfce.log 2>&1 &
           sleep 6
 
-      - name: Start VNC server
+      - name: Start VNC server (passworded or passwordless)
         run: |
           export DISPLAY=:0
           PW="${{ github.event.inputs.vnc_password }}"
           if [ -n "$PW" ]; then
-            x11vnc -storepasswd "$PW" ~/.vncpass
-            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth ~/.vncpass >/tmp/x11vnc.log 2>&1 &
+            x11vnc -storepasswd "$PW" "$HOME/.vncpass"
+            x11vnc -display :0 -rfbport 5900 -forever -shared -rfbauth "$HOME/.vncpass" \
+                   -repeat -noxfixes -noxdamage -noxrecord >/tmp/x11vnc.log 2>&1 &
           else
-            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw >/tmp/x11vnc.log 2>&1 &
+            x11vnc -display :0 -rfbport 5900 -forever -shared -nopw \
+                   -repeat -noxfixes -noxdamage -noxrecord >/tmp/x11vnc.log 2>&1 &
           fi
-          sleep 3
-          echo "✅ VNC server listening on port 5900"
+          sleep 2
 
       - name: Install and join ZeroTier
         run: |
           curl -s https://install.zerotier.com/ | sudo bash
           sudo zerotier-cli join "${{ github.event.inputs.zt_network }}"
-          for i in {1..30}; do
-            sudo zerotier-cli info && break
-            sleep 1
-          done
+          for i in {1..30}; do sudo zerotier-cli info && break; sleep 1; done
           sudo zerotier-cli listnetworks
 
-      - name: Authorize device automatically (optional)
+      - name: Auto-authorize member (optional)
         if: ${{ github.event.inputs.zt_api_token != '' }}
         run: |
           NET="${{ github.event.inputs.zt_network }}"
-          TOKEN="${{ github.event.inputs.zt_api_token }}"
+          TOK="${{ github.event.inputs.zt_api_token }}"
           NODE=$(sudo zerotier-cli info -j | jq -r .address)
           curl -fsSL -X POST \
-            -H "Authorization: token $TOKEN" \
+            -H "Authorization: token $TOK" \
             -H 'Content-Type: application/json' \
             -d '{"config":{"authorized":true}}' \
             "https://api.zerotier.com/api/v1/network/${NET}/member/${NODE}" >/dev/null || true
 
-      - name: Show connection info
+      - name: Show connect info
         run: |
-          IP=$(ip -4 -o addr show | awk '/zt/{print $4}' | cut -d/ -f1 | head -n1)
+          ZTIP=$(ip -4 -o addr show | awk '/zt/{print $4}' | cut -d/ -f1 | head -n1)
           echo ""
-          echo "================ Kali VNC ================"
-          echo "Connect using any VNC client:"
-          echo "  Host : ${IP}:5900"
+          echo "=========== Kali-like VNC on GitHub Runner ==========="
+          echo "Connect with any VNC client (RealVNC, bVNC, Mocha):"
+          echo "  Host : ${ZTIP}:5900"
           if [ -n "${{ github.event.inputs.vnc_password }}" ]; then
             echo "  Pass : (the one you entered)"
           else
             echo "  Pass : none (passwordless)"
           fi
-          echo "Client examples: RealVNC, bVNC, Mocha VNC"
-          echo "=========================================="
-          tail -n 15 /tmp/x11vnc.log || true
+          echo "Tools preinstalled: nmap, sqlmap, hydra, john, gobuster, nikto, hashcat, wordlists, dirb, tshark"
+          echo "======================================================="
+          tail -n 30 /tmp/x11vnc.log || true
 
-      - name: Keepalive
+      - name: Keep alive
         run: |
-          MIN=${{ github.event.inputs.minutes }}
-          [ "$MIN" -gt 355 ] && MIN=355
-          for i in $(seq 1 "$MIN"); do
-            echo "Kali Desktop alive ($i/$MIN) — connect via ZeroTier port 5900"
+          for i in $(seq 1 ${MIN}); do
+            echo "Desktop alive ($i/${MIN}) — connect via ZeroTier port 5900"
             sleep 60
           done

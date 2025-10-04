@@ -1,19 +1,19 @@
-name: VNC via NetBird (macOS) - Stable Mirror
+name: VNC via ZeroTier (macOS)
 
 on:
   workflow_dispatch:
     inputs:
-      nb_setup_key:
-        description: "NetBird Setup Key (from dashboard)"
+      zerotier_network:
+        description: "Your ZeroTier Network ID (from https://my.zerotier.com)"
         required: true
       vnc_password:
         description: "VNC password (max 8 chars)"
         required: false
         default: "12345678"
       runtime_minutes:
-        description: "Keep alive minutes (max 360)"
+        description: "Keep-alive runtime (max 360 min)"
         required: false
-        default: "60"
+        default: "120"
 
 permissions:
   contents: read
@@ -22,17 +22,7 @@ jobs:
   vnc:
     runs-on: macos-13
     timeout-minutes: 370
-    env:
-      NB_HOSTNAME: bullet
     steps:
-      - name: 📌 Connection Info (read first)
-        shell: bash
-        run: |
-          echo "===================================="
-          echo "🔗 VNC target: (will show after NetBird up)"
-          echo "Password: first 8 chars of your input"
-          echo "===================================="
-
       - name: Enable Screen Sharing (VNC)
         shell: bash
         run: |
@@ -45,57 +35,40 @@ jobs:
           sudo "$KS" -configure -setvncpw -vncpw "$VNC_PW"
           nohup caffeinate -dimsu >/tmp/caffeinate.log 2>&1 &
 
-      - name: Install NetBird (with fallback mirror)
+      - name: Install ZeroTier
         shell: bash
         run: |
           set -euo pipefail
-          echo "Installing NetBird..."
-          # Try official site first
-          if ! curl -fsSL https://get.netbird.io | bash; then
-            echo "⚠️ Primary installer failed, using GitHub fallback..."
-            curl -fsSL https://raw.githubusercontent.com/netbirdio/netbird/main/scripts/install.sh | bash
-          fi
-          echo "✅ NetBird installation complete."
+          curl -fL https://install.zerotier.com/ -o zt.sh
+          sudo bash zt.sh
+          sudo zerotier-cli status || true
+          sudo zerotier-cli join ${{ inputs.zerotier_network }}
+          echo "✅ Joined ZeroTier network: ${{ inputs.zerotier_network }}"
+          echo "Wait 15–20s, then authorize this client in your ZeroTier dashboard."
 
-      - name: Bring NetBird up
+      - name: Show connection info
         shell: bash
         run: |
-          set -euo pipefail
-          NB_BIN=$(command -v netbird || echo "$HOME/bin/netbird")
-          if [ ! -x "$NB_BIN" ]; then
-            echo "❌ NetBird binary not found after install"
-            exit 1
-          fi
-
-          sudo "$NB_BIN" set --hostname "$NB_HOSTNAME" || true
-          sudo "$NB_BIN" up --setup-key "${{ inputs.nb_setup_key }}"
-          echo "Waiting 10s for registration..."
-          sleep 10
-
-          VPN_IP=$("$NB_BIN" status 2>&1 | grep -Eo '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-          if [ -z "$VPN_IP" ]; then
-            VPN_IP=$(ifconfig | grep -Eo '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-          fi
-          if [ -n "$VPN_IP" ]; then
-            echo "NETBIRD_IP=$VPN_IP" >> "$GITHUB_ENV"
-            echo "===================================="
-            echo "✅ NetBird connected!"
-            echo "VNC Address: $VPN_IP:5900"
-            echo "Password: first 8 chars of your input"
-            echo "===================================="
-          else
-            echo "⚠️ Could not detect VPN IP. Check NetBird dashboard."
-          fi
+          echo "=========================================="
+          echo "ZeroTier ID:"
+          sudo zerotier-cli info | awk '{print $3}'
+          echo "------------------------------------------"
+          echo "After authorizing in ZeroTier web UI:"
+          echo "  → Find this device’s IP (starts with 10.x or 192.x)"
+          echo "  → Connect via RealVNC Viewer:"
+          echo "      Address: <that ZeroTier IP>:5900"
+          echo "      Password: first 8 chars of your input"
+          echo "=========================================="
 
       - name: Keep Alive
         shell: bash
         run: |
           rt="${{ inputs.runtime_minutes }}"
-          [[ "$rt" =~ ^[0-9]+$ ]] || rt=60
+          [[ "$rt" =~ ^[0-9]+$ ]] || rt=120
           (( rt > 360 )) && rt=360
           end=$(( $(date +%s) + 60 * rt ))
           while (( $(date +%s) < end )); do
             now=$(date '+%H:%M:%S')
-            echo "[NetBird+VNC] Heartbeat $now | ${NETBIRD_IP:-pending}:5900"
+            echo "[ZeroTier+VNC] Heartbeat $now"
             sleep 60
           done
